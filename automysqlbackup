@@ -95,6 +95,7 @@ load_default_config() {
   CONFIG_mail_address='root'
   CONFIG_encrypt='no'
   CONFIG_encrypt_password='password0123'
+  CONFIG_use_rdiff='no'
 }
 
 # @return:	true, if variable is set; else false
@@ -125,7 +126,7 @@ mail_cleanup () {
 				    backupfiles=( "${backupfiles[@]}" "$log_errfile" )
 				    errornote="WARNING: Error Reported - "
 			    fi
-				temp="$(mktemp "$CONFIG_backup_dir"/tmp/mail_content.XXXXXX)"
+				temp="$(mktemp "$CONFIG_backup_dir"/tmp/mail_content.XXXXXXXX)"
 			    # Get backup size
 			    attsize=`du -c "${backupfiles[@]}" | awk 'END {print $1}'`
 			    if (( ${CONFIG_mail_maxattsize} >= ${attsize} )); then
@@ -205,7 +206,7 @@ days_of_month() {
 # @return:	returns false if creation of temporary file failed or it can't be removed afterwards; else true
 # @deps:	(none)
 chk_folder_writable () {
-  local temp; temp="$(mktemp "$1"/tmp.XXXXXX)"
+  local temp; temp="$(mktemp "$1"/tmp.XXXXXXXX)"
   if (( $? == 0 )); then
     rm "${temp}" || return 1
     return 0
@@ -705,12 +706,14 @@ process_dbs() {
 
 	  if [[ "x$pid" = "x0" ]]; then
 		# -> create master backup
-		cfname="$(mktemp "${fname%.sql}_"XXXXXXXX".sql${suffix}")"
+		cfname="$(mktemp "${fname%.sql}_"XXXXXXXX"")" # stevek avoid limitation of mktemp on Redhat and old version
+        rm -f "$cfname"
+		cfname="${cfname}.sql${suffix}"
 		uid="${cfname%.@(diff|sql)*}"
 		uid="${uid:-8:8}"
 		case "${CONFIG_mysql_dump_compression}" in
 		'gzip')
-		  mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@" | gzip_compression > "$cfname";
+		  mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@" | gzip_compression > "$cfname"; 
 		  ;;
 		'bzip2')
 		  mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@" | bzip2_compression > "$cfname";
@@ -722,36 +725,78 @@ process_dbs() {
 		add_manifest_entry "$manifest_file" "$cfname" "$pid" "$db" && parse_manifest "$manifest_file" && cp -al "$cfname" "${CONFIG_backup_dir}"/latest/ && echo "Generated master backup $cfname" && return 0 || return 1
 		# <- create master backup
 	  else
-		cfname="$(mktemp "${fname%.sql}_"XXXXXXXX".diff${suffix}")"
+		cfname="$(mktemp "${fname%.sql}_"XXXXXXXX"")"
+        rm -f "$cfname"      
+        if [ "$CONFIG_use_rdiff" == 'yes' ]; then      
+		    cfname="${cfname}.rdiff${suffix}"
+        else
+            cfname="${cfname}.diff${suffix}"
+        fi      
 		uid="${cfname%.@(diff|sql)*}"
 		uid=${uid:-8:8}
 		echo "Creating differential backup to ${manifest_entry[0]}:"
 		case "${CONFIG_mysql_dump_compression}" in
 		'gzip')
 		  if (( $filename_flags & $filename_flag_gz )); then
-			diff <(gzip_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                gzip_compression -dc "${manifest_latest_master_entry[0]}" | rdiff signature -- - | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "${cfname}";
+            else
+                diff <(gzip_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "$cfname";
+            fi         
 		  elif (( $filename_flags & $filename_flag_bz2 )); then
-			diff <(bzip2_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                 bzip2_compression -dc "${manifest_latest_master_entry[0]}" | rdiff signature -- - | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "${cfname}";
+            else      
+			     diff <(bzip2_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "$cfname";
+            fi         
 		  else
-			diff "${manifest_latest_master_entry[0]}" <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then      
+                rdiff signature ${manifest_latest_master_entry[0]} | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "${cfname}";
+            else
+                diff "${manifest_latest_master_entry[0]}" <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | gzip_compression > "$cfname";
+            fi    
 		  fi
 		  ;;
 		'bzip2')
 		  if (( $filename_flags & $filename_flag_gz )); then
-			diff <(gzip_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                gzip_compression -dc "${manifest_latest_master_entry[0]}" | rdiff signature -- - | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "${cfname}";
+            else      
+			    diff <(gzip_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "$cfname";
+            fi         
 		  elif (( $filename_flags & $filename_flag_bz2 )); then
-			diff <(bzip2_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                bzip2_compression -dc "${manifest_latest_master_entry[0]}" | rdiff signature -- - | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "${cfname}";
+            else      
+			    diff <(bzip2_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "$cfname";
+            fi         
 		  else
-			diff "${manifest_latest_master_entry[0]}" <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "$cfname";
+             if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                rdiff signature "${manifest_latest_master_entry[0]}" | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "${cfname}";
+             else      
+			    diff "${manifest_latest_master_entry[0]}" <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") | bzip2_compression > "$cfname";
+             fi         
 		  fi
 		  ;;
 		*)
 		  if (( $filename_flags & $filename_flag_gz )); then
-			diff <(gzip_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                gzip_compression -dc "${manifest_latest_master_entry[0]}" | rdiff signature -- - | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "${cfname}";
+            else      
+			    diff <(gzip_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "$cfname";
+            fi         
 		  elif (( $filename_flags & $filename_flag_bz2 )); then
-			diff <(bzip2_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                bzip2_compression -dc "${manifest_latest_master_entry[0]}" | rdiff signature -- - | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "${cfname}";
+            else      
+			    diff <(bzip2_compression -dc "${manifest_latest_master_entry[0]}") <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "$cfname";
+            fi         
 		  else
-			diff "${manifest_latest_master_entry[0]}" <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "$cfname";
+            if [ "$CONFIG_use_rdiff" == 'yes' ]; then
+                rdiff signature "${manifest_latest_master_entry[0]}" | rdiff delta -- - <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "${cfname}";
+            else      
+			    diff "${manifest_latest_master_entry[0]}" <(mysqldump --user="${CONFIG_mysql_dump_username}" --password="${CONFIG_mysql_dump_password}" --host="${CONFIG_mysql_dump_host}" "${opt[@]}" "$@") > "$cfname";
+            fi         
 		  fi
 		  ;;
 		esac
@@ -1411,7 +1456,7 @@ add_manifest_entry() {
   parent_id="$3"
   db="$4"
   lock_manifest "$1" || return 1
-  id="${filename%.@(diff|sql)*}"
+  id="${filename%.@(diff|rdiff|sql)*}"
   id="${id:(-8):8}"
   #id="$(echo $filename | sed -re 's/.*_[0-9]{2}h[0-9]{2}m_([^\.]*)\..*/\1/')"
   md5sum="$(md5sum "$filename" | awk '{print $1}')"
@@ -1969,7 +2014,7 @@ method_backup () {
 	# -> finished information
 	echo "Total disk space used for backup storage..."
 	echo "Size - Location"
-	echo `du -hsH "${CONFIG_backup_dir}"`
+	echo `du -hs "${CONFIG_backup_dir}"`
 	echo
 	echo "======================================================================"
 	# <- finished information
@@ -2099,6 +2144,7 @@ method_list_manifest_entries () {
 				  re=".*\.gz.*";		[[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_gz"
 				  re=".*\.bz2.*";		[[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_bz2"
 				  re=".*\.diff.*";	[[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_diff"
+                  re=".*\.rdiff.*";  [[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_rdiff"
 				  if (( $master_flags & $filename_flag_gz )); then
 					declare -a testarray=("${to_rm[@]}")
 					if ! in_array "${master%.gz}"; then
@@ -2138,7 +2184,7 @@ method_list_manifest_entries () {
 	# END __MAIN
 }
 
-# @info:	Convert a differential backup file to a full one.
+# @info:	Convert a differential backup file to a full one. It might not work with rdiff (stevek)
 # @param:	master_backup_file diff_backup_file
 method_diff_to_full() {
 	local diff full diff_flags master_flags to_rm
@@ -2160,6 +2206,7 @@ method_diff_to_full() {
 	re=".*\.gz.*";		[[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_gz"
 	re=".*\.bz2.*";		[[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_bz2"
 	re=".*\.diff.*";	[[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_diff"
+    re=".*\.rdiff.*";   [[ "$FileExt" =~ $re ]] && let "master_flags|=$filename_flag_rdiff"   
 
 	# TODO: Differential backup with encryption is not yet implemented!
 	if (( $diff_flags & $filename_flag_encrypted )); then
@@ -2193,9 +2240,11 @@ method_diff_to_full() {
 	else
 	  :
 	fi
-
-	patch "$master" "$diff" -o "${diff/diff/sql}"
-
+    if (( $master_flags & $filename_flag_rdiff )); then
+      rdiff patch  "$master" "$diff" "${diff/diff/sql}"
+    else
+	   patch "$master" "$diff" -o "${diff/diff/sql}"
+    fi
 	# cleanup
 	for i in "${to_rm[@]}"; do rm "$i"; done
 }
