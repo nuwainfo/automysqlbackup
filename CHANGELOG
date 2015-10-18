@@ -2,6 +2,12 @@
 # Change Log
 #=====================================================================
 #
+# version 3.1 - (2015-10-18)
+#     - Apply patch: http://sourceforge.net/p/automysqlbackup/patches/27/ Fix mktemp error on rhel 5 and 6. Add option to use rdiff in 
+# version 3.0_rc6 - (?)
+#     - ?
+# version 3.0_rc5 - (?)
+#     - ?
 # version 3.0_rc4 - (2011-11-24)
 #     - Removing mkfifo commands, thereby improving portability.
 #     - Fixing not working table exclude feature for wildcards.
